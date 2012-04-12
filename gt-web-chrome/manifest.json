@@ -1,0 +1,20 @@
+/*
+ * Copyright (c) 2012 IITiS PAN Gliwice <http://www.iitis.pl/>
+ * Author: Paweł Foremski
+ * Licensed under GNU GPL v. 3
+ */
+
+{
+	"name": "Ground Truth web tracker",
+	"version": "1.0",
+	"manifest_version": 2,
+	"description": "http://mutrics.iitis.pl/",
+
+	"permissions": [
+		"webRequest", "tabs",
+		"<all_urls>"
+	],
+	"background": {
+		"scripts": ["background.js"]
+	}
+}
