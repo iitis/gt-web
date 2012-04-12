@@ -6,7 +6,7 @@
  * IDEAS
  * - local storage / upload service
  * - privacy?
- * - add OnBeforeReceiveHeaders / similar
+ * - add timing from OnBeforeReceiveHeaders / similar
  */
 
 var myip = "0.0.0.0";
@@ -14,23 +14,12 @@ var cache = {};
 
 var logit = function(url, d, cache)
 {
-	var size_down = 0;
 	var took = 0.0;
 	var ts;
 
 	/* skip cached responses */
 	if (d.fromCache)
 		return;
-
-	/* find size */
-	if (d.responseHeaders) {
-		for (var i = 0; i < d.responseHeaders.length; ++i) {
-			if (d.responseHeaders[i].name.toLowerCase() == 'content-length') {
-				size_down = d.responseHeaders[i].value;
-				break;
-			}
-		}
-	}
 
 	if (cache && cache.timeStamp)
 		ts = cache.timeStamp;
@@ -43,9 +32,7 @@ var logit = function(url, d, cache)
 		(ts / 1000) + "," +
 		d.ip + "," +
 		took + "," +
-		size_down + "," +
-		url.replace(/\?.*/, "") + "," +
-		d.url.replace(/\?.*/, "")
+		url.replace(/\?.*/, "")
 	);
 };
 
@@ -55,7 +42,6 @@ chrome.webRequest.onSendHeaders.addListener(function(d)
 }, {
 	urls: ["<all_urls>"]
 }, [
-	"requestHeaders"
 ]);
 
 chrome.webRequest.onCompleted.addListener(function(d)
@@ -78,7 +64,6 @@ chrome.webRequest.onCompleted.addListener(function(d)
 }, {
 	urls: ["<all_urls>"]
 }, [
-	"responseHeaders"
 ]);
 
 /*
