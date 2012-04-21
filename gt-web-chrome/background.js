@@ -30,7 +30,7 @@ var logit = function(str)
 
 //	console.log(str);
 	xhr = new XMLHttpRequest();
-	xhr.open("GET", logto + str, true);
+	xhr.open("GET", logto + str.replace('#', '?'), true);
 	xhr.send();
 };
 

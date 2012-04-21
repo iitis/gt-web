@@ -1,2 +1,2 @@
-server/httpd/httpd
 server/src/iitis
+server/out/*
