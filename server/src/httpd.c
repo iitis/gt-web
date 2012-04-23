@@ -4,8 +4,11 @@
 #include <sys/types.h> 
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 
 #define PORT 9131
+
+int extended = 0;
 
 void error(char *msg)
 {
@@ -22,16 +25,21 @@ int main(int argc, char *argv[])
 	int yes = 1;
 	int i;
 	char *msg;
+	char *addr;
 
-	if (argc > 1 && strcmp(argv[1], "check") == 0) {
-		printf("works\n");
-		return 0;
+	if (argc > 1) {
+		if (strcmp(argv[1], "check") == 0) {
+			printf("works\n");
+			return 0;
+		} else if (strcmp(argv[1], "ext") == 0) {
+			extended = 1;
+		}
 	}
 
 	setvbuf(stdout, NULL, _IONBF, 0);
 
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
-	if (sockfd < 0) 
+	if (sockfd < 0)
 		error("ERROR opening socket");
 
 	if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1)
@@ -39,8 +47,13 @@ int main(int argc, char *argv[])
 
 	bzero((char *) &serv_addr, sizeof(serv_addr));
 	serv_addr.sin_family = AF_INET;
-	serv_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-	serv_addr.sin_port = htons(PORT);
+	if (extended) {
+		serv_addr.sin_addr.s_addr = INADDR_ANY;
+		serv_addr.sin_port = htons(PORT + 1);
+	} else {
+		serv_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+		serv_addr.sin_port = htons(PORT);
+	}
 	if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) 
 		error("ERROR on binding");
 
@@ -49,7 +62,7 @@ int main(int argc, char *argv[])
 	while (1) {
 		clilen = sizeof(cli_addr);
 		newsockfd = accept(sockfd, (struct sockaddr *) &cli_addr, &clilen);
-		if (newsockfd < 0) 
+		if (newsockfd < 0)
 			error("ERROR on accept");
 
 		n = read(newsockfd, line, sizeof line);
@@ -70,6 +83,11 @@ int main(int argc, char *argv[])
 			continue;
 		else
 			line[i-9] = '\0';
+
+		if (extended) {
+			addr = inet_ntoa(cli_addr.sin_addr);
+			printf("%s,", addr);
+		}
 
 		printf("%s\n", msg);
 
