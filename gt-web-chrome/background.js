@@ -5,34 +5,20 @@
  */
 
 var logto = "http://localhost:9131/";
-var myip = "0.0.0.0";
+//var logto = "http://leming.iitis.pl:9132/";
 var cache = {};
-
-/*
- * Get my ip address
- */
-var xhr = new XMLHttpRequest();
-xhr.open("GET", "http://jsonip.com/", true);
-xhr.onreadystatechange = function() {
-	if (xhr.readyState == 4) {
-		var resp = JSON.parse(xhr.responseText);
-		myip = resp.ip;
-
-		logit("gt-web-chrome:" + myip);
-		logit("columns:timestamp,reply,completion,remote-ip,tab-url,req-url");
-	}
-}
-xhr.send();
 
 var logit = function(str)
 {
 	var xhr;
 
-//	console.log(str);
+	console.log(str);
 	xhr = new XMLHttpRequest();
 	xhr.open("GET", logto + str.replace('#', '?'), true);
 	xhr.send();
 };
+
+logit("hello");
 
 var reqdump = function(url, d, cache)
 {
@@ -43,11 +29,17 @@ var reqdump = function(url, d, cache)
 	if (d.fromCache)
 		return;
 
+	/* skip if proxy */
+	if (d.ip == "157.158.0.30")
+		return;
+
+	/* time when request was sent */
 	if (cache && cache.timeStamp)
 		ts = cache.timeStamp;
 	else
 		ts = d.timeStamp;
 
+	/* time when first byte was received */
 	if (cache && cache.headersReceivedOn)
 		ts2 = cache.headersReceivedOn;
 	else
@@ -61,12 +53,13 @@ var reqdump = function(url, d, cache)
 		reply + "," +
 		took + "," +
 		d.ip + "," +
+		d.type + "," +
 		url.substr(0, 50) + "," +
 		d.url.substr(0, 50)
 	);
 };
 
-chrome.webRequest.onSendHeaders.addListener(function(d)
+chrome.webRequest.onBeforeRequest.addListener(function(d)
 {
 	if (d.url.substr(0, logto.length) == logto)
 		return;
@@ -82,8 +75,10 @@ chrome.webRequest.onHeadersReceived.addListener(function(d)
 	if (d.url.substr(0, logto.length) == logto)
 		return;
 
-	if (cache[d.requestId])
-		cache[d.requestId].headersReceivedOn = d.timeStamp;
+	if (cache[d.requestId]) {
+		if (!cache[d.requestId].headersReceivedOn)
+			cache[d.requestId].headersReceivedOn = d.timeStamp;
+	}
 }, {
 	urls: ["<all_urls>"]
 }, [
@@ -96,6 +91,7 @@ chrome.webRequest.onCompleted.addListener(function(d)
 
 	var then = cache[d.requestId];
 
+	/* try to get tab address */
 	try {
 		chrome.tabs.get(d.tabId, function(tab)
 		{
@@ -103,12 +99,13 @@ chrome.webRequest.onCompleted.addListener(function(d)
 				reqdump(tab.url, d, then);
 			else
 				reqdump(d.url, d, then);
+
+			cache[d.requestId] = undefined;
 		});
 	} catch (e) {
 		reqdump(d.url, d, then);
+		cache[d.requestId] = undefined;
 	}
-
-	cache[d.requestId] = undefined;
 }, {
 	urls: ["<all_urls>"]
 }, [
