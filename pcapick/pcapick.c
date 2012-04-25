@@ -66,7 +66,7 @@ static int parse_argv(struct pcapick *pp, int argc, char *argv[])
 
 	/* defaults */
 	debug = 0;
-	pp->dir = ".";
+	pp->dir = "./out";
 
 	for (;;) {
 		c = getopt_long(argc, argv, short_opts, long_opts, &i);
@@ -98,6 +98,54 @@ static int parse_argv(struct pcapick *pp, int argc, char *argv[])
 }
 
 /*******************************/
+static void fix_name(struct pcapick *pp, struct req *req)
+{
+	static char name[128];
+	char *sl1, *sl2;
+	int i;
+
+	if (strncmp(req->appname, "https://", 8) == 0)
+		strncpy(name, req->appname + 8, sizeof(name));
+	else if (strncmp(req->appname, "http://", 7) == 0)
+		strncpy(name, req->appname + 7, sizeof(name));
+	else
+		return;
+
+	sl1 = strchr(name, '/');
+	if (sl1) {
+		*sl1 = '_';
+
+		sl2 = strchr(sl1+1, '/');
+		if (sl2) *sl2 = '\0';
+
+		sl2 = strchr(sl1+1, '?');
+		if (sl2) *sl2 = '\0';
+
+		sl2 = strchr(sl1+1, '.');
+		if (sl2) *sl1 = '\0';
+
+		if (sl1[1] == '\0')
+			sl1[0] = '\0';
+	}
+
+	for (i = 0; name[i]; i++) {
+		if (isalnum(name[i]))
+			continue;
+
+		switch (name[i]) {
+			case '.':
+			case '-':
+			case '_':
+				continue;
+			default:
+				break;
+		}
+
+		name[i] = '_';
+	}
+
+	strcpy(req->appname, name);
+}
 
 static void update_reqs(struct pcapick *pp)
 {
@@ -178,15 +226,6 @@ static void update_reqs(struct pcapick *pp)
 			tlist_insertafter(reqs, req);
 		else
 			tlist_prepend(reqs, req);
-
-#if 0
-		if (strcmp(addr, "173.194.65.18") == 0) {
-			printf("list for chosen IP now:\n");
-			tlist_iter_loop(reqs, req2) {
-				printf("  %.6f -> %.6f: %s\n", req2->start, req2->stop, req2->appname);
-			}
-		}
-#endif
 	}
 
 	if (feof(pp->gth)) {
@@ -228,8 +267,11 @@ static struct req *find_appname(struct pcapick *pp, const char *addr, bool https
 	/* if not yet started, return NULL */
 	if (!req || ts < req->start - PCAPICK_TIMEDIFF)
 		return NULL;
-	else
-		return req;
+
+	/* convert URL to web app name */
+	fix_name(pp, req);
+
+	return req;
 }
 
 /*******************************/
@@ -284,7 +326,6 @@ static void pkt(struct lfc *lfc, void *pdata,
 			return;
 		}
 
-#if 0
 		/* get PCAP output file */
 		out = thash_get(pp->out_files, f->req->appname);
 		if (!out) {
@@ -308,16 +349,13 @@ static void pkt(struct lfc *lfc, void *pdata,
 		}
 
 		f->out = out;
-#endif
 	}
 
-#if 0
 	trace_write_packet(f->out, pkt);
 	if (trace_is_err_output(f->out)) {
 		trace_perror_output(f->out, "Writing packet to output trace file");
 		die("trace_write_packet() failed\n");
 	}
-#endif
 
 	pp->with_req++;
 	f->req->pkts++;
@@ -356,6 +394,8 @@ int main(int argc, char *argv[])
 
 		if (pjf_mkdir(pp->dir) != 0)
 			die("Creating output directory '%s' failed\n", pp->dir);
+		else
+			printf("Storing output PCAP files in '%s' directory\n", pp->dir);
 	}
 
 	pp->lfc = lfc_init();
@@ -365,9 +405,9 @@ int main(int argc, char *argv[])
 	if (!lfc_run(pp->lfc, pp->pcap_file, pp->filter))
 		die("Reading file '%s' failed\n", pp->pcap_file);
 
-	dbg(1, "Success: %8d packets, %8d requests\n", pp->with_req, pp->with_pkts);
-	dbg(1, "Failed:  %8d packets, %8d requests\n", pp->no_req, pp->no_pkts);
-	dbg(1, "TOTAL:   %8d packets, %8d requests\n", pp->pktnum, pp->reqnum);
+	printf("Success: %8d packets, %8d requests\n", pp->with_req, pp->with_pkts);
+	printf("Failed:  %8d packets, %8d requests\n", pp->no_req, pp->no_pkts);
+	printf("TOTAL:   %8d packets, %8d requests\n", pp->pktnum, pp->reqnum);
 
 	lfc_deinit(pp->lfc);
 	thash_free(pp->out_files);
