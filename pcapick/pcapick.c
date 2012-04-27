@@ -9,6 +9,7 @@
 #include <getopt.h>
 #include <ctype.h>
 #include <string.h>
+#include <math.h>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -17,6 +18,7 @@
 
 #include <libpjf/main.h>
 #include <libflowcalc.h>
+#include <libtrace.h>
 
 #include "pcapick.h"
 
@@ -248,12 +250,6 @@ static void update_reqs(struct pcapick *pp)
 	/* update if @1 is fixed */
 	i = -1;
 	thash_iter_loop(pp->https_reqs, addr, reqs) {
-		/* skip Google */
-		if (strncmp(addr, "173.194.", 8) == 0)
-			continue;
-		if (strncmp(addr, "74.125.", 7) == 0)
-			continue;
-
 		if (i == -1 || tlist_count(reqs) < i) {
 			i = tlist_count(reqs);
 			pp->min_addr = addr;
@@ -263,8 +259,7 @@ static void update_reqs(struct pcapick *pp)
 			pp->min_ts = req->start;
 		}
 	}
-
-	printf("found: %s at %.6f\n", pp->min_addr, pp->min_ts);
+	printf("# time offset reference point: %s at %.6f\n", pp->min_addr, pp->min_ts);
 
 	if (feof(pp->gth)) {
 		fclose(pp->gth);
@@ -289,8 +284,8 @@ static struct req *find_req(struct pcapick *pp, const char *addr, bool https, do
 		if (ts > req->stop) {
 			pjf_assert(req->pkts == 0);
 
-			dbg(5, "no packets in request: start=%.6f stop=%.06f appname=%s\n",
-				req->start, req->stop, req->appname);
+			dbg(5, "no packets in request: start=%.6f length=%.06f appname=%s\n",
+				req->start, req->stop - req->start, req->appname);
 			pp->no_pkts++;
 
 			tlist_remove(reqs);
@@ -315,6 +310,69 @@ static struct req *find_req(struct pcapick *pp, const char *addr, bool https, do
 	return req;
 }
 
+bool tls_is_app(libtrace_packet_t *pkt)
+{
+	uint8_t proto;
+	uint16_t ethertype;
+	uint32_t rem;
+	void *ptr;
+	uint8_t *v;
+	int i, j;
+
+	ptr = trace_get_layer3(pkt, &ethertype, &rem);
+	if (!ptr || ethertype != TRACE_ETHERTYPE_IP)
+		return false;
+
+	ptr = trace_get_payload_from_ip(ptr, &proto, &rem);
+	if (!ptr || proto != TRACE_IPPROTO_TCP)
+		return false;
+
+	v = trace_get_payload_from_tcp(ptr, &rem);
+	if (!v || rem < 5)
+		return false;
+
+	i = 0;
+	while (i < rem) {
+		/* TLS major version must be 3 */
+		if (v[i+1] != 3)
+			return false;
+
+		/* TLS minor version must be <= 3 */
+		if (v[i+2] > 3)
+			return false;
+
+		/* check TLS Record Layer Protocol Type */
+		switch (v[i]) {
+			case 0x14: /* ChangeCipherSpec */
+			case 0x15: /* Alert */
+			case 0x16: /* Handshake */
+				break;
+			case 0x17: /* Application */
+				return true;
+			default:   /* not TLS? */
+				return false;
+		}
+
+		/* read the length and jump to next record */
+		j = v[i+3];
+		j = (j << 16) + v[i+4];
+		if (j > 16384)
+			return false;
+
+		i += j + 5;
+	}
+
+	return false;
+}
+
+void buffer_pkt(struct pcapick *pp, struct flow *f, libtrace_packet_t *pkt)
+{
+	if (!f->buffer)
+		f->buffer = tlist_create(trace_destroy_packet, pp->mm);
+
+	tlist_push(f->buffer, trace_copy_packet(pkt));
+}
+
 /*******************************/
 
 static void pkt(struct lfc *lfc, void *pdata,
@@ -325,6 +383,8 @@ static void pkt(struct lfc *lfc, void *pdata,
 	struct flow *f = data;
 	char *dir, *uri;
 	libtrace_out_t *out;
+	libtrace_packet_t *pkt2;
+	double diff;
 
 	if (f->ignore)
 		return;
@@ -361,6 +421,19 @@ static void pkt(struct lfc *lfc, void *pdata,
 		}
 	}
 
+	/*
+	 * check for reference point
+	 */
+	if (pp->min_ts > 0 && strcmp(pp->min_addr, f->addr) == 0) {
+		diff = pp->min_ts - ts;
+		if (fabs(diff) < 900) {
+			if (fabs(diff - pp->min_sugg) > 0.5) {
+				printf("# possible time offset suggestion: %.6f\n", diff);
+					pp->min_sugg = diff;
+			}
+		}
+	}
+
 found:
 	pp->pktnum++;
 
@@ -368,7 +441,7 @@ found:
 	 * check if the packet is still within a web request
 	 */
 	if (f->req && ts > f->req->stop + PCAPICK_TIMEDIFF_UP) {
-		dbg(5, "flow %d (%s:%d): matched %d packets\n",
+		dbg(4, "flow %d (%s:%d): matched %d packets\n",
 			lf->id, f->addr, f->port, f->req->pkts);
 		pp->with_pkts++;
 
@@ -381,6 +454,14 @@ found:
 	 * and update the flow data
 	 */
 	if (!f->req) {
+		/*
+		 * TLS: let only a TLS application packet to start a web request
+		 */
+		if (f->https && !tls_is_app(pkt)) {
+			buffer_pkt(pp, f, pkt);
+			return;
+		}
+
 		/* find matching request */
 		f->req = find_req(pp, f->addr, f->https, ts);
 
@@ -389,13 +470,13 @@ found:
 			pp->no_req++;
 			f->no_req++;
 			return;
-		} else {
-			dbg(5, "flow %d (%s:%d): pkt ts=%.6f: request found: ",
-				lf->id, f->addr, f->port, ts);
-			dbg(5, "start=%.6f length=%.6f appname=%s\n",
-				f->req->start, f->req->stop - f->req->start, f->req->appname);
 		}
 
+		/* found! */
+		dbg(5, "flow %d (%s:%d): pkt ts=%.6f: request found: ", lf->id, f->addr, f->port, ts);
+		dbg(5, "start=%.6f length=%.6f appname=%s\n", f->req->start, f->req->stop - f->req->start, f->req->appname);
+
+		/* select proper file on disk */
 		dir = mmatic_sprintf(pp->mm, "%s/%s/%s", pp->dir, f->req->appname, f->req->type);
 		uri = mmatic_sprintf(pp->mm, "pcapfile:%s/%s.pcap", dir, f->req->url);
 
@@ -426,6 +507,16 @@ found:
 		mmatic_free(dir);
 
 		f->out = out;
+
+		/* write any buffered packets */
+		if (f->buffer) {
+			tlist_iter_loop(f->buffer, pkt2) {
+				trace_write_packet(f->out, pkt2);
+			}
+
+			tlist_free(f->buffer);
+			f->buffer = NULL;
+		}
 	}
 
 	trace_write_packet(f->out, pkt);
@@ -448,14 +539,17 @@ static void flow(struct lfc *lfc, void *pdata,
 		return;
 
 	if (f->req) {
-		dbg(5, "flow %d (%s:%d): matched %d packets\n",
+		dbg(4, "flow %d (%s:%d): matched %d packets\n",
 			lf->id, f->addr, f->port, f->req->pkts);
 		pp->with_pkts++;
 		mmatic_free(f->req);
-	} else {
-		dbg(3, "flow %d (%s:%d): did not match %d packets\n",
+	} else if (f->no_req) {
+		dbg(5, "flow %d (%s:%d): %d packets left\n",
 			lf->id, f->addr, f->port, f->no_req);
 	}
+
+	if (f->buffer)
+		tlist_free(f->buffer);
 }
 
 /*******************************/
@@ -486,7 +580,7 @@ int main(int argc, char *argv[])
 		} else {
 			pp->gth = fopen(pp->gt_file, "r");
 			if (!pp->gth)
-				die("Reading input ARFF file '%s' failed: %s\n", pp->gt_file, strerror(errno));
+				die("Reading input ground truth file '%s' failed: %s\n", pp->gt_file, strerror(errno));
 		}
 
 		if (pjf_mkdir(pp->dir) != 0)
@@ -505,8 +599,8 @@ int main(int argc, char *argv[])
 	if (!lfc_run(pp->lfc, pp->pcap_file, pp->filter))
 		die("Reading file '%s' failed\n", pp->pcap_file);
 
-	printf("Success: %8d packets, %8d requests\n", pp->with_req, pp->with_pkts);
-	printf("Failed:  %8d packets, %8d requests\n", pp->no_req, pp->no_pkts);
+	printf("Matched: %8d packets, %8d requests\n", pp->with_req, pp->with_pkts);
+	printf("Dropped: %8d packets, %8d requests\n", pp->no_req, pp->no_pkts);
 	printf("TOTAL:   %8d packets, %8d requests\n", pp->pktnum, pp->reqnum);
 
 	lfc_deinit(pp->lfc);

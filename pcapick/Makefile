@@ -10,7 +10,7 @@ default: all
 all: $(TARGETS)
 
 pcapick: pcapick.c
-	gcc $(CFLAGS) -lflowcalc -lpjf pcapick.c -o pcapick
+	gcc $(CFLAGS) -lflowcalc -lpjf -lm pcapick.c -o pcapick
 
 ###
 

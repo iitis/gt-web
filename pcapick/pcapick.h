@@ -37,6 +37,7 @@ struct flow {
 
 	struct req *req;         /**> currently matched web request */
 	libtrace_out_t *out;     /**> output file handle */
+	tlist *buffer;           /**> buffered packets */
 
 	uint32_t no_req;         /**> number of packets without request */
 };
@@ -52,6 +53,7 @@ struct pcapick {
 	FILE *gth;               /**> gt_file handle */
 	const char *min_addr;    /**> remote IP address with the least number of requests */
 	double min_ts;           /**> timestamp of first request to min_addr */
+	double min_sugg;         /**> last offset suggestion */
 
 	const char *pcap_file;   /**> trace file */
 	const char *filter;      /**> optional filter */
