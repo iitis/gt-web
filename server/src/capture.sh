@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SNAPLEN=100
+SNAPLEN=0
 ERR=0
 
 # cd to this dir
@@ -55,8 +55,8 @@ function doexit()
 trap doexit EXIT
 
 # start tcpdump
-(tcpdump -qn -i any -s $SNAPLEN -w $PREFIX.pcap \
-	'(udp and port 53) or (tcp and (port 80 or port 443))' >/dev/null) &
+(tcpdump -qn -i any -s $SNAPLEN -w $PREFIX.pcap 'tcp and port 443' >/dev/null) &
+#	'(udp and port 53) or (tcp and (port 80 or port 443))' >/dev/null) &
 PID_TCPDUMP=$!
 
 # start httpd

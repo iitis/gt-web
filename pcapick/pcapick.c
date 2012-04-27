@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 
 #include <libpjf/main.h>
 #include <libflowcalc.h>
@@ -29,6 +30,8 @@ static void help(void)
 	printf("Options:\n");
 	printf("  -f \"<filter>\"          apply given packet filter on the input trace file\n");
 	printf("  -d <dir>               output directory\n");
+	printf("  -a                     dont ignore HTTP traffic\n");
+	printf("  -o <offset>            timestamp offset in gt-web file\n");
 	printf("  --verbose,-V           be verbose (alias for --debug=5)\n");
 	printf("  --debug=<num>          set debugging level\n");
 	printf("  --help,-h              show this usage help screen\n");
@@ -54,7 +57,7 @@ static int parse_argv(struct pcapick *pp, int argc, char *argv[])
 {
 	int i, c;
 
-	static char *short_opts = "hvVf:d:";
+	static char *short_opts = "hvVf:d:ao:";
 	static struct option long_opts[] = {
 		/* name, has_arg, NULL, short_ch */
 		{ "verbose",    0, NULL,  1  },
@@ -82,6 +85,8 @@ static int parse_argv(struct pcapick *pp, int argc, char *argv[])
 			case  4 : version(); return 2;
 			case 'f': pp->filter = mmatic_strdup(pp->mm, optarg); break;
 			case 'd': pp->dir = mmatic_strdup(pp->mm, optarg); break;
+			case 'a': pp->all = true; break;
+			case 'o': pp->drift = strtod(optarg, NULL); break;
 			default: help(); return 1;
 		}
 	}
@@ -98,16 +103,19 @@ static int parse_argv(struct pcapick *pp, int argc, char *argv[])
 }
 
 /*******************************/
-static void fix_name(struct pcapick *pp, struct req *req)
+/** Convert URL to something closer to a web app name
+ * @param buf128   an 128-element array
+ */
+static void fix_name(char *buf128)
 {
 	static char name[128];
 	char *sl1, *sl2;
 	int i;
 
-	if (strncmp(req->appname, "https://", 8) == 0)
-		strncpy(name, req->appname + 8, sizeof(name));
-	else if (strncmp(req->appname, "http://", 7) == 0)
-		strncpy(name, req->appname + 7, sizeof(name));
+	if (strncmp(buf128, "https://", 8) == 0)
+		strncpy(name, buf128 + 8, sizeof(name));
+	else if (strncmp(buf128, "http://", 7) == 0)
+		strncpy(name, buf128 + 7, sizeof(name));
 	else
 		return;
 
@@ -144,7 +152,7 @@ static void fix_name(struct pcapick *pp, struct req *req)
 		name[i] = '_';
 	}
 
-	strcpy(req->appname, name);
+	strncpy(buf128, name, 128);
 }
 
 static void update_reqs(struct pcapick *pp)
@@ -159,8 +167,9 @@ static void update_reqs(struct pcapick *pp)
 	if (!pp->gth)
 		return;
 
-	/* TODO: dont read everything once */
+	/* IDEA: dont read everything once (@1) */
 
+	/* read each line and parse */
 	while (fgets(buf, sizeof buf, pp->gth)) {
 		if (!isdigit(buf[0]))
 			continue;
@@ -172,30 +181,38 @@ static void update_reqs(struct pcapick *pp)
 		for (i = 0, tok = strtok(buf, ","); tok; tok = strtok(NULL, ","), i++) {
 			switch (i) {
 				case 0: /* start time */
-					req->start = strtod(tok, NULL);
+					req->start = strtod(tok, NULL) - pp->drift;
 					break;
 				case 1: /* first byte time offset */
 					break;
 				case 2: /* last byte time offset */
 					length = strtod(tok, NULL);
-					if (length > PCAPICK_MAX_LENGTH)
-						length = PCAPICK_MAX_LENGTH;
-
 					req->stop = req->start + length;
 					break;
 				case 3: /* remote IP address */
 					addr = tok;
 					break;
-				case 4: /* type */
+				case 4: /* request type */
 					/* support old format */
 					if (strncmp(tok, "http", 4) == 0) {
+						strcpy(req->type, "unknown");
 						strncpy(req->appname, tok, sizeof(req->appname));
 						i++;
+						break;
 					}
 
+					strncpy(req->type, tok, sizeof(req->type));
 					break;
 				case 5: /* tab address */
 					strncpy(req->appname, tok, sizeof(req->appname));
+					break;
+				case 6: /* requested URL */
+					if (strncmp(tok, "http", 4) != 0) {
+						i--;
+						break;
+					}
+
+					strncpy(req->url, tok, sizeof(req->url));
 					break;
 				default: /* ignore the rest */
 					break;
@@ -208,7 +225,7 @@ static void update_reqs(struct pcapick *pp)
 		/* find given IP */
 		reqs = thash_get(https ? pp->https_reqs : pp->http_reqs, addr);
 		if (!reqs) {
-			reqs = tlist_create(mmatic_free, pp->mm);
+			reqs = tlist_create(NULL, pp->mm);
 			thash_set(https ? pp->https_reqs : pp->http_reqs, addr, reqs);
 		}
 
@@ -228,13 +245,34 @@ static void update_reqs(struct pcapick *pp)
 			tlist_prepend(reqs, req);
 	}
 
+	/* update if @1 is fixed */
+	i = -1;
+	thash_iter_loop(pp->https_reqs, addr, reqs) {
+		/* skip Google */
+		if (strncmp(addr, "173.194.", 8) == 0)
+			continue;
+		if (strncmp(addr, "74.125.", 7) == 0)
+			continue;
+
+		if (i == -1 || tlist_count(reqs) < i) {
+			i = tlist_count(reqs);
+			pp->min_addr = addr;
+
+			tlist_reset(reqs);
+			req = tlist_peek(reqs);
+			pp->min_ts = req->start;
+		}
+	}
+
+	printf("found: %s at %.6f\n", pp->min_addr, pp->min_ts);
+
 	if (feof(pp->gth)) {
 		fclose(pp->gth);
 		pp->gth = NULL;
 	}
 }
 
-static struct req *find_appname(struct pcapick *pp, const char *addr, bool https, double ts)
+static struct req *find_req(struct pcapick *pp, const char *addr, bool https, double ts)
 {
 	struct req *req;
 	tlist *reqs;
@@ -248,16 +286,15 @@ static struct req *find_appname(struct pcapick *pp, const char *addr, bool https
 	/* remove old entries and ensure that ts < req->stop */
 	tlist_reset(reqs);
 	while ((req = tlist_iter(reqs))) {
-		if (req->stop < ts) {
-			if (req->pkts == 0) {
-				dbg(5, "no packets in request: start=%.6f appname=%s\n",
-					req->start, req->appname);
-				pp->no_pkts++;
-			} else {
-				pp->with_pkts++;
-			}
+		if (ts > req->stop) {
+			pjf_assert(req->pkts == 0);
+
+			dbg(5, "no packets in request: start=%.6f stop=%.06f appname=%s\n",
+				req->start, req->stop, req->appname);
+			pp->no_pkts++;
 
 			tlist_remove(reqs);
+			mmatic_free(req);
 			continue;
 		}
 
@@ -265,11 +302,15 @@ static struct req *find_appname(struct pcapick *pp, const char *addr, bool https
 	}
 
 	/* if not yet started, return NULL */
-	if (!req || ts < req->start - PCAPICK_TIMEDIFF)
+	if (!req || ts < req->start - PCAPICK_TIMEDIFF_DOWN)
 		return NULL;
 
-	/* convert URL to web app name */
-	fix_name(pp, req);
+	/* reserve this request for the calling flow */
+	tlist_remove(reqs);
+
+	/* convert URL addresses */
+	fix_name(req->appname);
+	fix_name(req->url);
 
 	return req;
 }
@@ -282,7 +323,7 @@ static void pkt(struct lfc *lfc, void *pdata,
 {
 	struct pcapick *pp = pdata;
 	struct flow *f = data;
-	char *uri;
+	char *dir, *uri;
 	libtrace_out_t *out;
 
 	if (f->ignore)
@@ -292,11 +333,27 @@ static void pkt(struct lfc *lfc, void *pdata,
 	 * check if its a web app flow
 	 */
 	if (is_new) {
-		if (lf->src.port == 80 || lf->src.port == 443) {
-			f->https = (lf->src.port == 443);
+		if (pp->all) {
+			if (lf->src.port == 80) {
+				f->https = false;
+				f->port = lf->dst.port;
+				strncpy(f->addr, inet_ntoa(lf->src.addr.ip4), sizeof(f->addr));
+				goto found;
+			} else if (lf->dst.port == 80) {
+				f->https = false;
+				f->port = lf->src.port;
+				strncpy(f->addr, inet_ntoa(lf->dst.addr.ip4), sizeof(f->addr));
+				goto found;
+			}
+		}
+
+		if (lf->src.port == 443) {
+			f->https = true;
+			f->port = lf->dst.port;
 			strncpy(f->addr, inet_ntoa(lf->src.addr.ip4), sizeof(f->addr));
-		} else if (lf->dst.port == 80 || lf->dst.port == 443) {
-			f->https = (lf->dst.port == 443);
+		} else if (lf->dst.port == 443) {
+			f->https = true;
+			f->port = lf->src.port;
 			strncpy(f->addr, inet_ntoa(lf->dst.addr.ip4), sizeof(f->addr));
 		} else {
 			f->ignore = true;
@@ -304,33 +361,50 @@ static void pkt(struct lfc *lfc, void *pdata,
 		}
 	}
 
+found:
 	pp->pktnum++;
 
 	/*
 	 * check if the packet is still within a web request
 	 */
-	if (f->req && ts > f->req->stop)
+	if (f->req && ts > f->req->stop + PCAPICK_TIMEDIFF_UP) {
+		dbg(5, "flow %d (%s:%d): matched %d packets\n",
+			lf->id, f->addr, f->port, f->req->pkts);
+		pp->with_pkts++;
+
+		mmatic_free(f->req);
 		f->req = NULL;
+	}
 
 	/*
 	 * if no matching web request, search for it in the ground truth file
+	 * and update the flow data
 	 */
 	if (!f->req) {
 		/* find matching request */
-		f->req = find_appname(pp, f->addr, f->https, ts);
+		f->req = find_req(pp, f->addr, f->https, ts);
 
 		/* if not found */
 		if (!f->req) {
-			dbg(3, "no matching web request: ts=%.6f server=%s\n", ts, f->addr);
 			pp->no_req++;
+			f->no_req++;
 			return;
+		} else {
+			dbg(5, "flow %d (%s:%d): pkt ts=%.6f: request found: ",
+				lf->id, f->addr, f->port, ts);
+			dbg(5, "start=%.6f length=%.6f appname=%s\n",
+				f->req->start, f->req->stop - f->req->start, f->req->appname);
 		}
 
-		/* get PCAP output file */
-		out = thash_get(pp->out_files, f->req->appname);
-		if (!out) {
-			uri = mmatic_sprintf(pp->mm, "pcap:%s/%s.pcap", pp->dir, f->req->appname);
+		dir = mmatic_sprintf(pp->mm, "%s/%s/%s", pp->dir, f->req->appname, f->req->type);
+		uri = mmatic_sprintf(pp->mm, "pcapfile:%s/%s.pcap", dir, f->req->url);
 
+		if (pjf_mkdir(dir) != 0)
+			die("Creating directory '%s' failed\n", dir);
+
+		/* get PCAP output file */
+		out = thash_get(pp->out_files, uri);
+		if (!out) {
 			out = trace_create_output(uri);
 			if (!out)
 				die("trace_create_output(%s) failed\n", uri);
@@ -345,8 +419,11 @@ static void pkt(struct lfc *lfc, void *pdata,
 				die("trace_start_output(%s) failed\n", uri);
 			}
 
-			thash_set(pp->out_files, f->req->appname, out);
+			thash_set(pp->out_files, uri, out);
 		}
+
+		mmatic_free(uri);
+		mmatic_free(dir);
 
 		f->out = out;
 	}
@@ -359,6 +436,26 @@ static void pkt(struct lfc *lfc, void *pdata,
 
 	pp->with_req++;
 	f->req->pkts++;
+}
+
+static void flow(struct lfc *lfc, void *pdata,
+	struct lfc_flow *lf, void *data)
+{
+	struct pcapick *pp = pdata;
+	struct flow *f = data;
+
+	if (f->ignore)
+		return;
+
+	if (f->req) {
+		dbg(5, "flow %d (%s:%d): matched %d packets\n",
+			lf->id, f->addr, f->port, f->req->pkts);
+		pp->with_pkts++;
+		mmatic_free(f->req);
+	} else {
+		dbg(3, "flow %d (%s:%d): did not match %d packets\n",
+			lf->id, f->addr, f->port, f->no_req);
+	}
 }
 
 /*******************************/
@@ -399,8 +496,11 @@ int main(int argc, char *argv[])
 	}
 
 	pp->lfc = lfc_init();
-	lfc_register(pp->lfc, "pcapick", sizeof(struct flow), pkt, NULL, pp);
+	lfc_register(pp->lfc, "pcapick", sizeof(struct flow), pkt, flow, pp);
+
+	/* start TCP sessions with any packet, wait after FIN/ACK */
 	lfc_enable(pp->lfc, LFC_OPT_TCP_ANYSTART);
+	lfc_enable(pp->lfc, LFC_OPT_TCP_WAIT);
 
 	if (!lfc_run(pp->lfc, pp->pcap_file, pp->filter))
 		die("Reading file '%s' failed\n", pp->pcap_file);

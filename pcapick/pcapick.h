@@ -14,16 +14,18 @@
 
 #define PCAPICK_VER "0.1"
 
-/* how much time [s] to subtract from ground truth web request start time */
-#define PCAPICK_TIMEDIFF 0.1
+/* web request time margin: start time [s] */
+#define PCAPICK_TIMEDIFF_DOWN 0.1
 
-/* cap web request length to this value */
-#define PCAPICK_MAX_LENGTH 30.0
+/* web request time margin: stop time [s] */
+#define PCAPICK_TIMEDIFF_UP 0.001
 
 struct req {
 	double start;            /**> web request start */
 	double stop;             /**> web request stop */
+	char type[32];           /**> request type */
 	char appname[128];       /**> web request app name */
+	char url[128];           /**> web request URL */
 	uint32_t pkts;           /**> packet counter */
 };
 
@@ -31,9 +33,12 @@ struct flow {
 	bool ignore;             /**> if true, ignore this flow */
 	bool https;              /**> if true, its a HTTPS flow */
 	char addr[16];           /**> server address */
+	int port;                /**> client port */
 
 	struct req *req;         /**> currently matched web request */
 	libtrace_out_t *out;     /**> output file handle */
+
+	uint32_t no_req;         /**> number of packets without request */
 };
 
 struct pcapick {
@@ -45,9 +50,14 @@ struct pcapick {
 
 	const char *gt_file;     /**> gt-web ground truth file */
 	FILE *gth;               /**> gt_file handle */
+	const char *min_addr;    /**> remote IP address with the least number of requests */
+	double min_ts;           /**> timestamp of first request to min_addr */
 
 	const char *pcap_file;   /**> trace file */
 	const char *filter;      /**> optional filter */
+
+	bool all;                /**> if true, include HTTP traffic */
+	double drift;            /**> ground truth timestamp offset (vs. PCAP) */
 
 	const char *dir;         /**> output directory */
 	thash *out_files;        /**> appname -> libtrace_out_t* */
