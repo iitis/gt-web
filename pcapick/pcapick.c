@@ -428,7 +428,7 @@ static void pkt(struct lfc *lfc, void *pdata,
 		diff = pp->min_ts - ts;
 		if (fabs(diff) < 900) {
 			if (fabs(diff - pp->min_sugg) > 0.5) {
-				printf("# possible time offset suggestion: %.6f\n", diff);
+				printf("# possible time offset suggestion: %.6f\n", pp->drift + diff);
 					pp->min_sugg = diff;
 			}
 		}
