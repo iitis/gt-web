@@ -4,13 +4,16 @@ CFLAGS   += $(FLAGS) -std=gnu99 -Dinline='inline __attribute__ ((gnu_inline))' $
 PREFIX ?= /usr
 PKGDST = $(DESTDIR)$(PREFIX)
 
-TARGETS = pcapick
+TARGETS = pcapick pcapick-loose
 
 default: all
 all: $(TARGETS)
 
 pcapick: pcapick.c
 	gcc $(CFLAGS) -lflowcalc -lpjf -lm pcapick.c -o pcapick
+
+pcapick-loose: pcapick-loose.c
+	gcc $(CFLAGS) -lflowcalc -lpjf -lm pcapick-loose.c -o pcapick-loose
 
 ###
 
